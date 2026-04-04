@@ -43,7 +43,7 @@ yellow_bg='\033[43m'
 # Environment Variables (YT-DLP)
 ytdlp_path="$SCRIPT_DIR/yt-dlp-downloads"
 ytdlp_list="$ytdlp_path/settings/list.txt"
-ytdlp_download_url="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+ytdlp_download_url=""
 ytdlp_executable="$ytdlp_path/yt-dlp"
 ytdlp_audio_path="$ytdlp_path/audio"
 ytdlp_video_path="$ytdlp_path/video"
@@ -107,6 +107,19 @@ print_module() {
     fi
 }
 
+# --- Architecture Detection ---
+
+detect_arch_url() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64)  ytdlp_download_url="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" ;;
+        aarch64) ytdlp_download_url="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64" ;;
+        armv7l)  ytdlp_download_url="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_armv7l" ;;
+        *) error "Unsupported architecture: $arch"; exit 1 ;;
+    esac
+}
+
 # --- Settings Management Functions ---
 
 save_audio_settings() {
@@ -162,32 +175,67 @@ save_video_settings() {
     } > "$video_modules_path"
 }
 
-load_settings() {
-    if [ -f "$audio_modules_path" ]; then
-        # shellcheck source=/dev/null
-        . "$audio_modules_path"
-    else
-        touch "$audio_modules_path"
+load_settings_file_safe() {
+    # Safe key=value parser — no shell execution
+    local filepath="$1"
+    if [ ! -f "$filepath" ]; then
+        touch "$filepath"
+        return
     fi
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip blank lines
+        [[ -z "$line" ]] && continue
+        # Extract key=value, strip surrounding quotes from value
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val#\'}" ; val="${val%\'}"
+        val="${val#\"}" ; val="${val%\"}"
+        # Only allow known variable names (alphanumeric + underscore)
+        if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+            printf -v "$key" '%s' "$val"
+        fi
+    done < "$filepath"
+}
 
-    if [ -f "$video_modules_path" ]; then
-        # shellcheck source=/dev/null
-        . "$video_modules_path"
-    else
-        touch "$video_modules_path"
-    fi
+load_settings() {
+    load_settings_file_safe "$audio_modules_path"
+    load_settings_file_safe "$video_modules_path"
 }
 
 # --- Core Functionality ---
+
+# Build command args as an array — no eval needed
+build_cmd_args() {
+    local type="$1"
+    cmd_args=()
+    if [[ "$type" == "audio" ]]; then
+        cmd_args+=("-x")
+        [[ "$audio_sponsorblock_trigger" == "true" ]] && cmd_args+=("--sponsorblock-remove" "all")
+        [[ "$audio_format_trigger" == "true" && -n "$audio_format" ]] && cmd_args+=("--audio-format" "$audio_format")
+        [[ "$audio_quality_trigger" == "true" && -n "$audio_quality" ]] && cmd_args+=("--audio-quality" "$audio_quality")
+        [[ "$audio_acodec_trigger" == "true" && -n "$audio_acodec" ]] && cmd_args+=("-S" "acodec:$audio_acodec")
+        [[ "$audio_metadata_trigger" == "true" ]] && cmd_args+=("--embed-metadata" "--embed-chapters" "--embed-thumbnail")
+        [[ "$audio_verbose_trigger" == "true" ]] && cmd_args+=("--verbose")
+    else
+        [[ "$video_sponsorblock_trigger" == "true" ]] && cmd_args+=("--sponsorblock-remove" "all")
+        [[ "$video_mergeoutputformat_trigger" == "true" && -n "$mergeoutputformat" ]] && cmd_args+=("--merge-output-format" "$mergeoutputformat")
+        [[ "$video_resolution_trigger" == "true" && -n "$video_resolution" ]] && cmd_args+=("-S" "res:$video_resolution")
+        [[ "$video_acodec_trigger" == "true" && -n "$video_acodec" ]] && cmd_args+=("-S" "acodec:$video_acodec")
+        [[ "$video_vcodec_trigger" == "true" && -n "$video_vcodec" ]] && cmd_args+=("-S" "vcodec:$video_vcodec")
+        [[ "$video_metadata_trigger" == "true" ]] && cmd_args+=("--embed-metadata" "--embed-chapters" "--embed-thumbnail")
+    fi
+}
 
 download_media() {
     local type="$1" # "audio" or "video"
     local path_var="ytdlp_${type}_path"
     local output_path="${!path_var}"
-    local cmd_var="${type}_start_command"
-    local start_command="${!cmd_var}"
     local title_type
     title_type=$(tr '[:lower:]' '[:upper:]' <<< "${type:0:1}")${type:1}
+
+    # Build command args array (safe — no eval)
+    build_cmd_args "$type"
 
     set_title "YT-DLP [DOWNLOAD $title_type]"
     clear
@@ -201,15 +249,20 @@ download_media() {
     # Download from list if not empty
     if (( line_count > 0 )); then
         echo -e "${blue_fg_strong}| > / Home / Download $type / List                             |${reset}"
-        echo -e "${blue_fg_strong}==============================================================${reset}"
-        echo -e "${cyan_fg_strong}______________________________________________________________${reset}"
+        echo -e "${blue_fg_strong} ==============================================================${reset}"
+        echo -e "${cyan_fg_strong} ______________________________________________________________${reset}"
         echo -e "${cyan_fg_strong}| DEBUG                                                        |${reset}"
-        echo "   Preview command: $start_command"
-        echo -e "${cyan_fg_strong}______________________________________________________________${reset}"
+        echo "   Preview command: ${cmd_args[*]}"
+        echo -e "${cyan_fg_strong} ______________________________________________________________${reset}"
         echo -e "${cyan_fg_strong}| List.txt info                                                |${reset}"
         echo "   Total links queued for download: $line_count"
-        echo -e "${cyan_fg_strong}______________________________________________________________${reset}"
-        
+        echo -e "${cyan_fg_strong} ______________________________________________________________${reset}"
+        echo -e "${cyan_fg_strong}| Menu Options:                                                |${reset}"
+        echo "   Y. Download all items"
+        echo "   N. Cancel"
+        echo -e "${cyan_fg_strong} ______________________________________________________________${reset}"
+        echo -e "${cyan_fg_strong}|                                                              |${reset}"
+
         read -p "Download all items from list? [Y/n]: " confirm
         if [[ "$confirm" =~ ^[Nn]$ ]]; then
             info "Download canceled. Returning to home."
@@ -224,9 +277,7 @@ download_media() {
                 continue
             fi
             info "Downloading $type from $url..."
-            # Use eval to expand the command string correctly, including arguments with spaces
-            # shellcheck disable=SC2086
-            eval "$ytdlp_executable" -P "\"$output_path\"" $start_command -w "\"$url\""
+            "$ytdlp_executable" -P "$output_path" "${cmd_args[@]}" -w "$url"
             echo "[$(date +'%Y-%m-%d %H:%M:%S')] [$title_type] - $url" >> "$log_path"
         done < "$ytdlp_list"
 
@@ -237,12 +288,16 @@ download_media() {
     # Manual input if list is empty
     else
         echo -e "${blue_fg_strong}| > / Home / Download $type / Manual                           |${reset}"
-        echo -e "${blue_fg_strong}==============================================================${reset}"
+        echo -e "${blue_fg_strong} ==============================================================${reset}"
         echo "   List is empty. Switching to manual input mode."
-        echo "   Insert a URL. To know which sites are supported visit:"
+        echo "   Insert a URL. To know which sites are supported visit the link below:"
         echo "   https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md"
-        echo -e "${cyan_fg_strong}______________________________________________________________${reset}"
-        
+        echo -e "${cyan_fg_strong} ______________________________________________________________${reset}"
+        echo -e "${cyan_fg_strong}| Menu Options:                                                |${reset}"
+        echo "   0. Cancel"
+        echo -e "${cyan_fg_strong} ______________________________________________________________${reset}"
+        echo -e "${cyan_fg_strong}|                                                              |${reset}"
+
         read -p "Insert URL (or 0 to cancel): " url
         if [[ "$url" == "0" || -z "$url" ]]; then
             return
@@ -254,13 +309,12 @@ download_media() {
             download_media "$type"
             return
         fi
-        
+
         info "Downloading $type from $url..."
-        # shellcheck disable=SC2086
-        eval "$ytdlp_executable" -P "\"$output_path\"" $start_command -w "\"$url\""
+        "$ytdlp_executable" -P "$output_path" "${cmd_args[@]}" -w "$url"
         echo "[$(date +'%Y-%m-%d %H:%M:%S')] [$title_type] - $url" >> "$log_path"
     fi
-    
+
     info "${green_fg_strong}$title_type file(s) downloaded successfully.${reset}"
     # Open the output folder when download is finished (xdg-open is the standard)
     if command -v xdg-open &> /dev/null; then
@@ -284,7 +338,7 @@ home_menu() {
         echo "4. Update"
         echo "5. Uninstall yt-dlp"
         echo "0. Exit"
-        
+
         read -p "Choose Your Destiny: " choice
 
         case "$choice" in
@@ -310,7 +364,7 @@ editor_menu() {
         echo "2. Edit Video Modules"
         echo "3. Edit list.txt"
         echo "0. Back to Home"
-        
+
         read -p "Choose an option: " choice
 
         case "$choice" in
@@ -337,16 +391,16 @@ edit_audio_modules_menu() {
         print_module "2. Audio Format (--audio-format $audio_format)" "$audio_format_trigger"
         print_module "3. Audio Quality (--audio-quality $audio_quality)" "$audio_quality_trigger"
         print_module "4. Audio Codec (-S acodec:$audio_acodec)" "$audio_acodec_trigger"
-        print_module "5. Metadata (--embed-metadata...)" "$audio_metadata_trigger"
-        print_module "6. Verbose output (--verbose)" "$audio_verbose_trigger"
+        print_module "5. Metadata (--embed-metadata --embed-chapters --embed-thumbnail)" "$audio_metadata_trigger"
+        print_module "6. verbose (--verbose)" "$audio_verbose_trigger"
 
         echo ""
         echo "00. Quick Download Audio"
         echo "0. Back"
 
-        read -p "Choose modules to toggle (e.g., 1 5): " choices
+        read -p "Choose modules to enable/disable: " choices
         if [[ -z "$choices" ]]; then continue; fi
-        
+
         for choice in $choices; do
             case "$choice" in
                 1) [[ "$audio_sponsorblock_trigger" == "true" ]] && audio_sponsorblock_trigger="false" || audio_sponsorblock_trigger="true" ;;
@@ -365,24 +419,246 @@ edit_audio_modules_menu() {
 }
 
 audio_format_menu() {
-    local formats=("mp3" "wav" "flac" "opus" "vorbis" "aac" "m4a" "alac")
-    # ... Similar logic for other submenus ...
-    audio_format_trigger="true" # Enable if a choice is made
-    # ...
-    # This part gets repetitive; for brevity, only showing one submenu implementation
-    # The full implementation would have menus for quality, codec, resolution, etc.
-    # as defined in the original batch script. The logic is similar for all.
-    info "Audio sub-menus would be implemented here following the script's logic."
-    pause
+    set_title "YT-DLP [SELECT AUDIO FORMAT]"
+    clear
+    echo -e "${blue_fg_strong}/ Home / Editor / Edit Audio Modules / SELECT AUDIO FORMAT${reset}"
+    echo "-------------------------------------------------------------"
+    echo "1. mp3"
+    echo "2. wav"
+    echo "3. flac"
+    echo "4. opus"
+    echo "5. vorbis"
+    echo "6. aac"
+    echo "7. m4a"
+    echo "8. alac"
+    echo -e "${red_fg_strong}00. Disable this module${reset}"
+    echo "0. Cancel"
+
+    read -p "Your choice: " choice
+    case "$choice" in
+        1)  audio_format="mp3";    audio_format_trigger="true" ;;
+        2)  audio_format="wav";    audio_format_trigger="true" ;;
+        3)  audio_format="flac";   audio_format_trigger="true" ;;
+        4)  audio_format="opus";   audio_format_trigger="true" ;;
+        5)  audio_format="vorbis"; audio_format_trigger="true" ;;
+        6)  audio_format="aac";    audio_format_trigger="true" ;;
+        7)  audio_format="m4a";    audio_format_trigger="true" ;;
+        8)  audio_format="alac";   audio_format_trigger="true" ;;
+        00) audio_format="";       audio_format_trigger="false" ;;
+        0)  return ;;
+        *)  error "$echo_invalidinput"; pause; audio_format_menu ;;
+    esac
 }
-# NOTE: The other editor sub-menus (audio_quality, audio_acodec, video_resolution, etc.)
-# are omitted for brevity but would follow the same pattern as the main menus:
-# display options, read choice, update variable, save settings.
+
+audio_quality_menu() {
+    set_title "YT-DLP [SELECT AUDIO QUALITY]"
+    clear
+    echo -e "${blue_fg_strong}/ Home / Editor / Edit Audio Modules / SELECT AUDIO QUALITY${reset}"
+    echo "-------------------------------------------------------------"
+    echo "1.  [0] [Best Quality]"
+    echo "2.  1"
+    echo "3.  2"
+    echo "4.  3"
+    echo "5.  4"
+    echo "6.  5"
+    echo "7.  6"
+    echo "8.  7"
+    echo "9.  8"
+    echo "10. 9"
+    echo "11. [10] [Worst Quality]"
+    echo "00. Disable this module"
+    echo "0.  Cancel"
+
+    read -p "Your choice: " choice
+    case "$choice" in
+        1)  audio_quality="0";  audio_quality_trigger="true" ;;
+        2)  audio_quality="1";  audio_quality_trigger="true" ;;
+        3)  audio_quality="2";  audio_quality_trigger="true" ;;
+        4)  audio_quality="3";  audio_quality_trigger="true" ;;
+        5)  audio_quality="4";  audio_quality_trigger="true" ;;
+        6)  audio_quality="5";  audio_quality_trigger="true" ;;
+        7)  audio_quality="6";  audio_quality_trigger="true" ;;
+        8)  audio_quality="7";  audio_quality_trigger="true" ;;
+        9)  audio_quality="8";  audio_quality_trigger="true" ;;
+        10) audio_quality="9";  audio_quality_trigger="true" ;;
+        11) audio_quality="10"; audio_quality_trigger="true" ;;
+        00) audio_quality="";   audio_quality_trigger="false" ;;
+        0)  return ;;
+        *)  error "$echo_invalidinput"; pause; audio_quality_menu ;;
+    esac
+}
+
+# Shared codec selection — sets ${prefix}_acodec and ${prefix}_acodec_trigger
+_acodec_select() {
+    local prefix="$1" title="$2" retry_func="$3"
+    local codecs=(mp3 wav flac opus vorbis aac mp4a ac4)
+
+    set_title "YT-DLP [SELECT AUDIO CODEC]"
+    clear
+    echo -e "${blue_fg_strong}${title}${reset}"
+    echo "-------------------------------------------------------------"
+    local i
+    for i in "${!codecs[@]}"; do
+        echo "$(( i + 1 )). ${codecs[$i]}"
+    done
+    echo -e "${red_fg_strong}00. Disable this module${reset}"
+    echo "0. Cancel"
+
+    read -p "Your choice: " choice
+    if [[ "$choice" == "0" ]]; then
+        return
+    elif [[ "$choice" == "00" ]]; then
+        printf -v "${prefix}_acodec" '%s' ""
+        printf -v "${prefix}_acodec_trigger" '%s' "false"
+    elif (( choice >= 1 && choice <= ${#codecs[@]} )) 2>/dev/null; then
+        printf -v "${prefix}_acodec" '%s' "${codecs[$(( choice - 1 ))]}"
+        printf -v "${prefix}_acodec_trigger" '%s' "true"
+    else
+        error "$echo_invalidinput"; pause; "$retry_func"
+    fi
+}
+
+audio_acodec_menu() {
+    _acodec_select "audio" "/ Home / Editor / Edit Audio Modules / SELECT AUDIO CODEC" "audio_acodec_menu"
+}
 
 edit_video_modules_menu() {
-    # This would be very similar to edit_audio_modules_menu
-    info "Video module editor would be implemented here."
-    pause
+    while true; do
+        set_title "YT-DLP [EDIT VIDEO MODULES]"
+        clear
+        echo -e "${blue_fg_strong}/ Home / Editor / Edit Video Modules${reset}"
+        echo "-------------------------------------------------------------"
+        echo "Choose Video modules to enable or disable"
+        echo -e "Preview: ${cyan_fg_strong}$video_start_command${reset}"
+        echo ""
+
+        print_module "1. Sponsor Block (--sponsorblock-remove all)" "$video_sponsorblock_trigger"
+        print_module "2. Merge Output Format (--merge-output-format $mergeoutputformat)" "$video_mergeoutputformat_trigger"
+        print_module "3. Resolution (-S res:$video_resolution)" "$video_resolution_trigger"
+        print_module "4. Audio Codec (-S acodec:$video_acodec)" "$video_acodec_trigger"
+        print_module "5. Video Codec (-S vcodec:$video_vcodec)" "$video_vcodec_trigger"
+        print_module "6. Metadata (--embed-metadata --embed-chapters --embed-thumbnail)" "$video_metadata_trigger"
+
+        echo ""
+        echo "00. Quick Download Video"
+        echo "0. Back"
+
+        read -p "Choose modules to enable/disable: " choices
+        if [[ -z "$choices" ]]; then continue; fi
+
+        for choice in $choices; do
+            case "$choice" in
+                1) [[ "$video_sponsorblock_trigger" == "true" ]] && video_sponsorblock_trigger="false" || video_sponsorblock_trigger="true" ;;
+                2) video_mergeoutputformat_menu ;;
+                3) video_resolution_menu ;;
+                4) video_acodec_menu ;;
+                5) video_vcodec_menu ;;
+                6) [[ "$video_metadata_trigger" == "true" ]] && video_metadata_trigger="false" || video_metadata_trigger="true" ;;
+                00) download_media "video"; return ;;
+                0) save_video_settings; return ;;
+                *) error "Invalid choice: $choice" ;;
+            esac
+        done
+        save_video_settings
+    done
+}
+
+video_mergeoutputformat_menu() {
+    set_title "YT-DLP [SELECT MERGE OUTPUT FORMAT]"
+    clear
+    echo -e "${blue_fg_strong}/ Home / Editor / Edit Video Modules / SELECT MERGE OUTPUT FORMAT${reset}"
+    echo "-------------------------------------------------------------"
+    echo "1. mp4"
+    echo "2. flv"
+    echo "3. mkv"
+    echo "4. mov"
+    echo "5. avi"
+    echo "6. webm"
+    echo -e "${red_fg_strong}00. Disable this module${reset}"
+    echo "0. Cancel"
+
+    read -p "Your choice: " choice
+    case "$choice" in
+        1)  mergeoutputformat="mp4";  video_mergeoutputformat_trigger="true" ;;
+        2)  mergeoutputformat="flv";  video_mergeoutputformat_trigger="true" ;;
+        3)  mergeoutputformat="mkv";  video_mergeoutputformat_trigger="true" ;;
+        4)  mergeoutputformat="mov";  video_mergeoutputformat_trigger="true" ;;
+        5)  mergeoutputformat="avi";  video_mergeoutputformat_trigger="true" ;;
+        6)  mergeoutputformat="webm"; video_mergeoutputformat_trigger="true" ;;
+        00) mergeoutputformat="";     video_mergeoutputformat_trigger="false" ;;
+        0)  return ;;
+        *)  error "$echo_invalidinput"; pause; video_mergeoutputformat_menu ;;
+    esac
+}
+
+video_resolution_menu() {
+    set_title "YT-DLP [SELECT VIDEO RESOLUTION]"
+    clear
+    echo -e "${blue_fg_strong}/ Home / Editor / Edit Video Modules / SELECT VIDEO RESOLUTION${reset}"
+    echo "-------------------------------------------------------------"
+    echo "1. 4320p 8K"
+    echo "2. 2160p 4K"
+    echo "3. 1440p HD"
+    echo "4. 1080p HD"
+    echo "5. 720p"
+    echo "6. 480p"
+    echo "7. 360p"
+    echo "8. 240p"
+    echo "9. 144p"
+    echo -e "${red_fg_strong}00. Disable this module${reset}"
+    echo "0. Cancel"
+
+    read -p "Your choice: " choice
+    case "$choice" in
+        1)  video_resolution="4320"; video_resolution_trigger="true" ;;
+        2)  video_resolution="2160"; video_resolution_trigger="true" ;;
+        3)  video_resolution="1440"; video_resolution_trigger="true" ;;
+        4)  video_resolution="1080"; video_resolution_trigger="true" ;;
+        5)  video_resolution="720";  video_resolution_trigger="true" ;;
+        6)  video_resolution="480";  video_resolution_trigger="true" ;;
+        7)  video_resolution="360";  video_resolution_trigger="true" ;;
+        8)  video_resolution="240";  video_resolution_trigger="true" ;;
+        9)  video_resolution="144";  video_resolution_trigger="true" ;;
+        00) video_resolution="";     video_resolution_trigger="false" ;;
+        0)  return ;;
+        *)  error "$echo_invalidinput"; pause; video_resolution_menu ;;
+    esac
+}
+
+video_acodec_menu() {
+    _acodec_select "video" "/ Home / Editor / Edit Video Modules / SELECT AUDIO CODEC" "video_acodec_menu"
+}
+
+video_vcodec_menu() {
+    set_title "YT-DLP [SELECT VIDEO CODEC]"
+    clear
+    echo -e "${blue_fg_strong}/ Home / Editor / Edit Video Modules / SELECT VIDEO CODEC${reset}"
+    echo "-------------------------------------------------------------"
+    echo "1. h264"
+    echo "2. h265"
+    echo "3. h263"
+    echo "4. av01"
+    echo "5. vp9.2"
+    echo "6. vp9"
+    echo "7. vp8"
+    echo "8. theora"
+    echo -e "${red_fg_strong}00. Disable this module${reset}"
+    echo "0. Cancel"
+
+    read -p "Your choice: " choice
+    case "$choice" in
+        1)  video_vcodec="h264";   video_vcodec_trigger="true" ;;
+        2)  video_vcodec="h265";   video_vcodec_trigger="true" ;;
+        3)  video_vcodec="h263";   video_vcodec_trigger="true" ;;
+        4)  video_vcodec="av01";   video_vcodec_trigger="true" ;;
+        5)  video_vcodec="vp9.2";  video_vcodec_trigger="true" ;;
+        6)  video_vcodec="vp9";    video_vcodec_trigger="true" ;;
+        7)  video_vcodec="vp8";    video_vcodec_trigger="true" ;;
+        8)  video_vcodec="theora"; video_vcodec_trigger="true" ;;
+        00) video_vcodec="";       video_vcodec_trigger="false" ;;
+        0)  return ;;
+        *)  error "$echo_invalidinput"; pause; video_vcodec_menu ;;
+    esac
 }
 
 edit_list() {
@@ -445,7 +721,7 @@ exit_ytdlp() {
 
 check_dependencies() {
     info "Checking for required dependencies..."
-    declare -A deps=( ["curl"]="curl" ["ffmpeg"]="ffmpeg" ["git"]="git" )
+    declare -A deps=( ["curl"]="curl" ["ffmpeg"]="ffmpeg" ["atomicparsley"]="atomicparsley" )
     local missing_deps=()
     for cmd in "${!deps[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -455,12 +731,15 @@ check_dependencies() {
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         warn "The following dependencies are missing: ${missing_deps[*]}"
-        local pm_install
+        local pm_update pm_install
         if command -v apt-get &> /dev/null; then
-            pm_install="sudo apt-get update && sudo apt-get install -y"
+            pm_update="sudo apt-get update -qq"
+            pm_install="sudo apt-get install -y"
         elif command -v dnf &> /dev/null; then
+            pm_update=""
             pm_install="sudo dnf install -y"
         elif command -v pacman &> /dev/null; then
+            pm_update=""
             pm_install="sudo pacman -S --noconfirm"
         else
             error "Could not detect a supported package manager (apt, dnf, pacman)."
@@ -468,6 +747,7 @@ check_dependencies() {
             exit 1
         fi
         info "Attempting to install missing dependencies..."
+        [[ -n "$pm_update" ]] && $pm_update
         if ! $pm_install "${missing_deps[@]}"; then
             error "Failed to install dependencies. Please install them manually."
             exit 1
@@ -499,7 +779,7 @@ create_shortcut() {
             return
         fi
     fi
-    
+
     read -p "Do you want to create a shortcut on the desktop? [Y/n] " create
     if [[ -z "$create" || "$create" =~ ^[Yy]$ ]]; then
         info "Creating shortcut..."
@@ -524,9 +804,13 @@ EOL
 main() {
     set_title "YT-DLP [STARTUP CHECK]"
 
+    # Detect architecture and set download URL
+    detect_arch_url
+
     # Check for spaces or special characters in the script path
-    if [[ "$SCRIPT_DIR" =~ \ |[!#\$%&()\*+,;<=>?@\[\]\^\{|\}~] ]]; then
-        error "Path cannot contain spaces or special characters: [!#\$%&'()*+,;<=>?@[]^`{|}~]"
+    local bad_chars='[[:space:]!#$%&()*+,;<=>?@\[\]^`{|}~]'
+    if [[ "$SCRIPT_DIR" =~ $bad_chars ]]; then
+        error "Path cannot contain spaces or special characters: [!#\$%&'()*+,;<=>?@[]^\`{|}~]"
         error "Path: ${red_bg}$SCRIPT_DIR${reset}"
         pause
         exit 1
@@ -539,9 +823,9 @@ main() {
     # Load settings from files
     load_settings
 
-    # Check for system dependencies like curl, ffmpeg, git
+    # Check for system dependencies like curl, ffmpeg
     check_dependencies
-    
+
     # Check if yt-dlp exists, if not, download it
     if [ ! -f "$ytdlp_executable" ]; then
         install_ytdlp
@@ -550,7 +834,7 @@ main() {
         pause
         exec bash "$0" "$@" # Restart script
     fi
-    
+
     home_menu
 }
 
