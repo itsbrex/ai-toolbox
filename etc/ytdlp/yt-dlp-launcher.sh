@@ -336,7 +336,7 @@ home_menu() {
         echo "2. Download video"
         echo "3. Editor"
         echo "4. Update"
-        echo "5. Uninstall yt-dlp"
+        if [ ! -f /.dockerenv ]; then echo '5. Uninstall yt-dlp'; fi
         echo "0. Exit"
 
         read -p "Choose Your Destiny: " choice
@@ -346,7 +346,7 @@ home_menu() {
             2) download_media "video" ;;
             3) editor_menu ;;
             4) update_ytdlp ;;
-            5) uninstall_ytdlp ;;
+            5) if [ ! -f /.dockerenv ]; then uninstall_ytdlp; else error "Uninstall is not available in container mode."; pause; fi ;;
             0) exit_ytdlp ;;
             *) error "$echo_invalidinput"; pause ;;
         esac
@@ -824,7 +824,9 @@ main() {
     load_settings
 
     # Check for system dependencies like curl, ffmpeg
-    check_dependencies
+    if [ ! -f /.dockerenv ]; then
+        check_dependencies
+    fi
 
     # Check if yt-dlp exists, if not, download it
     if [ ! -f "$ytdlp_executable" ]; then
